@@ -17,11 +17,11 @@ mod tests {
         assert_eq!(log2_floor(1 << 31), 31);
 
         // Non powers of 2
-        assert_eq!(log2_floor(3), 1);     // 2^1 = 2 < 3 < 4 = 2^2
+        assert_eq!(log2_floor(3), 1); // 2^1 = 2 < 3 < 4 = 2^2
         assert_eq!(log2_floor(5), 2);
         assert_eq!(log2_floor(15), 3);
         assert_eq!(log2_floor(17), 4);
-        assert_eq!(log2_floor(999), 9);   // 2^9 = 512 < 999 < 1024 = 2^10
+        assert_eq!(log2_floor(999), 9); // 2^9 = 512 < 999 < 1024 = 2^10
 
         // Edge case
         assert_eq!(log2_floor(u32::MAX), 31);
