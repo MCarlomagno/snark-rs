@@ -1,6 +1,6 @@
 ## Snark-rs
 
-A simple library for snarks circuits.
+A simple library for PLONK circuit setup, proving and verification. Inspired in snarkjs.
 
 ### Roadmap
 
