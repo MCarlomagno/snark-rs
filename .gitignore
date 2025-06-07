@@ -1,0 +1,6 @@
+/target
+*.ptau
+*.r1cs
+*.zkey
+
+PRIVATE.md
