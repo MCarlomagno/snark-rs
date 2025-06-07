@@ -11,6 +11,12 @@ pub struct Curve {
     pub f1: Field,
 }
 
+/// Given a field modulus `q`, returns curve-specific metadata such as the number
+/// of 64-bit words needed to represent elements in the base field (F1).
+///
+/// This function currently supports BN128 and BLS12-381. It uses the modulus to
+/// identify which curve is being referenced. If the modulus doesn't match a known
+/// curve, it returns an error.
 pub fn get_curve_from_q(q: &BigUint) -> Result<Curve> {
     let bn128q: BigUint = BigUint::parse_bytes(b"21888242871839275222246405745257275088696311157297823662689037894645226208583", 10).unwrap();
     let bls12381q: BigUint = BigUint::parse_bytes(b"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab", 16).unwrap();
