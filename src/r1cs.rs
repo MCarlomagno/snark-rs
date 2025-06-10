@@ -14,7 +14,7 @@ pub enum ConstraintOutput {
     ),
 }
 
-pub fn process_constraints(fr: R1csField, r1cs: &mut R1cs) -> ConstraintOutput {
+pub fn process_constraints(fr: &R1csField, r1cs: &mut R1cs) -> ConstraintOutput {
     match fr {
         R1csField::Bn128(_) => {
             let (constraints, additions) = process_constraints_impl::<Bn128>(r1cs);

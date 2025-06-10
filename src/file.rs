@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::curves::{Curve, get_curve_from_q};
 
@@ -74,6 +74,57 @@ impl BinFile {
     pub async fn skip(&mut self, n: u64) -> Result<()> {
         self.pos += n;
         self.file.seek(SeekFrom::Start(self.pos)).await?;
+        Ok(())
+    }
+
+    pub async fn create<P: AsRef<Path>>(
+        path: P,
+        magic_type: &str,
+        version: u32,
+        n_sections: u32,
+    ) -> Result<Self> {
+        if magic_type.len() != 4 {
+            bail!("Magic type must be exactly 4 characters");
+        }
+
+        let mut file = File::create(path).await?;
+        let mut pos = 0;
+
+        // Write magic type
+        file.write_all(magic_type.as_bytes()).await?;
+        pos += 4;
+
+        // Write version
+        file.write_all(&version.to_le_bytes()).await?;
+        pos += 4;
+
+        // Write number of sections
+        file.write_all(&n_sections.to_le_bytes()).await?;
+        pos += 4;
+
+        Ok(Self { file, pos })
+    }
+
+    pub async fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.file.write_all(data).await?;
+        self.pos += data.len() as u64;
+        Ok(())
+    }
+
+    pub async fn write_u32(&mut self, val: u32) -> Result<()> {
+        self.file.write_all(&val.to_le_bytes()).await?;
+        self.pos += 4;
+        Ok(())
+    }
+
+    pub async fn write_u64(&mut self, val: u64) -> Result<()> {
+        self.file.write_all(&val.to_le_bytes()).await?;
+        self.pos += 8;
+        Ok(())
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        self.file.flush().await?;
         Ok(())
     }
 }
@@ -413,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_real_ptau_file() -> Result<()> {
-        let path = "src/fixtures/pot24.ptau";
+        let path = "src/artifacts/pot24.ptau";
         let (_bin_file, sections) = read_bin_file(path, "ptau", 1).await?;
 
         // Check basic expectations on real file
@@ -444,7 +495,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Heavy test, run only on demand.
     async fn test_read_constraints_basic() -> Result<()> {
-        let path = "src/fixtures/email_auth.r1cs";
+        let path = "src/artifacts/email_auth.r1cs";
 
         let (mut fd, sections) = read_bin_file(path, "r1cs", 1).await?;
         let header = read_r1cs_header(&mut fd, &sections).await?;

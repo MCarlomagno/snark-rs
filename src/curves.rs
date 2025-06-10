@@ -13,6 +13,15 @@ pub enum R1csField {
     Bls12_381(Bls12_381),
 }
 
+impl Clone for R1csField {
+    fn clone(&self) -> Self {
+        match self {
+            R1csField::Bn128(_) => R1csField::Bn128(Bn128 {}),
+            R1csField::Bls12_381(_) => R1csField::Bls12_381(Bls12_381 {}),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Curve {
     pub f1: Field,
@@ -46,6 +55,7 @@ pub fn get_curve_from_q(q: &BigUint) -> Result<Curve> {
     ).unwrap();
     
     if q == &bn_128_q {
+        let test = Bn128 {};
         Ok(Curve {
             f1: Field { n64: 4 }, // 256 bits / 64
             q: bn_128_q,
@@ -67,6 +77,7 @@ pub fn get_curve_from_q(q: &BigUint) -> Result<Curve> {
         bail!("Curve not supported: {}", q);
     }
 }
+
 
 #[cfg(test)]
 mod tests {
