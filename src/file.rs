@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use r1cs::num::BigUint;
 use std::collections::HashMap;
 use std::io::SeekFrom;
@@ -6,7 +6,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::curves::{Curve, get_curve_from_q};
+use crate::curves::Curve;
 
 const R1CS_FILE_HEADER_SECTION: u32 = 1;
 const R1CS_FILE_CUSTOM_GATES_LIST_SECTION: u32 = 4;
@@ -16,9 +16,6 @@ pub struct R1cs {
     pub header: R1csHeader,
     pub constraints: Vec<[HashMap<u32, BigUint>; 3]>,
 }
-
-pub type LinearCombination = HashMap<u32, BigUint>; // idx → coefficient
-pub type Constraint = [LinearCombination; 3]; // A, B, C
 
 #[derive(Debug)]
 pub struct R1csHeader {
@@ -42,12 +39,17 @@ pub struct Section {
 pub struct BinFile {
     pub file: File,
     pub pos: u64,
+    section_start: Option<u64>,
 }
 
 impl BinFile {
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path).await?;
-        Ok(Self { file, pos: 0 })
+        Ok(Self {
+            file,
+            pos: 0,
+            section_start: None,
+        })
     }
 
     pub async fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>> {
@@ -102,7 +104,11 @@ impl BinFile {
         file.write_all(&n_sections.to_le_bytes()).await?;
         pos += 4;
 
-        Ok(Self { file, pos })
+        Ok(Self {
+            file,
+            pos,
+            section_start: None,
+        })
     }
 
     pub async fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
@@ -125,6 +131,34 @@ impl BinFile {
 
     pub async fn flush(&mut self) -> Result<()> {
         self.file.flush().await?;
+        Ok(())
+    }
+
+    pub async fn start_write_section(&mut self, id_section: u32) -> Result<()> {
+        if self.section_start.is_some() {
+            bail!("Already writing a section");
+        }
+
+        self.write_u32(id_section).await?; // Section ID
+        self.section_start = Some(self.pos); // Mark where the size will be written
+        self.write_u64(0).await?; // Placeholder for section size
+        Ok(())
+    }
+
+    pub async fn end_write_section(&mut self) -> Result<()> {
+        let section_start = self
+            .section_start
+            .take()
+            .ok_or_else(|| anyhow!("Not writing a section"))?;
+        let section_size = self.pos - section_start - 8;
+        let current_pos = self.pos;
+
+        // Seek back to write the section size
+        self.file.seek(SeekFrom::Start(section_start)).await?;
+        self.file.write_all(&section_size.to_le_bytes()).await?;
+        self.pos = current_pos; // Restore pos after writing
+        self.file.seek(SeekFrom::Start(current_pos)).await?;
+
         Ok(())
     }
 }
@@ -196,7 +230,7 @@ pub async fn read_ptau_header(
     let n8 = fd.read_u32().await?;
     let buff = fd.read_bytes(n8 as usize).await?;
     let q_biguint = BigUint::from_bytes_le(&buff);
-    let curve = get_curve_from_q(&q_biguint).unwrap();
+    let curve = Curve::from_q(&q_biguint).unwrap();
 
     if (curve.f1.n64 * 8) != n8.try_into().unwrap() {
         return Err(anyhow!(
@@ -331,7 +365,8 @@ pub async fn read_constraints(
     fd.file.read_exact(&mut buf).await?;
     fd.pos += section.size;
 
-    let mut constraints: Vec<[HashMap<u32, BigUint>; 3]> = Vec::with_capacity(r1cs.n_constraints as usize);
+    let mut constraints: Vec<[HashMap<u32, BigUint>; 3]> =
+        Vec::with_capacity(r1cs.n_constraints as usize);
     let mut cursor = 0;
 
     for _ in 0..r1cs.n_constraints {
@@ -356,16 +391,23 @@ pub async fn read_constraints(
 
     // Optional: sanity check we consumed entire section
     if (cursor as u64) != section.size {
-        bail!("Unexpected constraint section size: read {}, expected {}", cursor, section.size);
+        bail!(
+            "Unexpected constraint section size: read {}, expected {}",
+            cursor,
+            section.size
+        );
     }
 
     Ok(constraints)
-} 
+}
 
 pub async fn read_r1cs_fd(fd: &mut BinFile, sections: &HashMap<u32, Vec<Section>>) -> Result<R1cs> {
     let header = read_r1cs_header(fd, sections).await?;
     let constraints = read_constraints(fd, sections, &header).await?;
-    Ok(R1cs { header, constraints })
+    Ok(R1cs {
+        header,
+        constraints,
+    })
 }
 
 #[cfg(test)]

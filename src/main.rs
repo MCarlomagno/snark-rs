@@ -1,19 +1,12 @@
 use std::cmp::max;
 
-use ::r1cs::{num::BigUint, Bls12_381, Bn128, Element, Field};
-
-use crate::{curves::R1csField, file::BinFile};
+use crate::file::BinFile;
+use ::r1cs::{Bn128, Element, num::BigUint};
 
 mod curves;
 mod file;
-mod utils;
 mod r1cs;
-
-#[derive(Debug)]
-pub enum K1K2 {
-    Bn128(Element<Bn128>, Element<Bn128>),
-    Bls12_381(Element<Bls12_381>, Element<Bls12_381>),
-}
+mod utils;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,9 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Plonk n_vars: {}, n_public: {}", plonk_n_vars, n_public);
     println!("Processing constraints...");
-    let constraints = r1cs::process_constraints(&curve.fr, &mut r1cs);
-
-    let mut fd_zkey = file::BinFile::create("output.zkey", "zkey", 1, 14).await?;
+    let (plonk_constraints, plonk_additions) = r1cs::process_constraints(&mut r1cs);
 
     // 1. Check if R1CS curve matches ptau curve prime
     if r1cs.header.prime != curve.r {
@@ -57,23 +48,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 2. Compute circuit power
-    let plonk_constraints_len = match &constraints {
-        r1cs::ConstraintOutput::Bn128(c, _) => c.len(),
-        r1cs::ConstraintOutput::Bls12_381(c, _) => c.len(),
-    };
-
-    let mut cir_power = ((plonk_constraints_len - 1) as f64).log2().ceil() as u32;
+    let mut cir_power = ((plonk_constraints.len() - 1) as f64).log2().ceil() as u32;
     cir_power = max(cir_power, 3); // t polynomial requires at least power 3
 
     let domain_size = 1 << cir_power;
 
-    println!("ℹ️  Plonk constraints: {}", plonk_constraints_len);
+    println!("ℹ️  Plonk constraints: {}", plonk_constraints.len());
 
     if cir_power > power {
         eprintln!(
             "❌ Circuit too big for this PTAU. 2**{} > 2**{} ({} constraints)",
-            cir_power, power, plonk_constraints_len
+            cir_power,
+            power,
+            plonk_constraints.len()
         );
         return Ok(());
     }
@@ -84,47 +71,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let (k1, k2) = get_k1_k2(&curve.r, cir_power as usize, domain_size);
+    println!("ℹ️  k1: {}, k2: {}", k1, k2);
 
-    let k1k2 = match &curve.fr {
-        R1csField::Bn128(_) => {
-            let (k1, k2) = get_k1_k2::<Bn128>(&curve.r, cir_power as usize, domain_size);
-            K1K2::Bn128(k1, k2)
-        }
-        R1csField::Bls12_381(_) => {
-            let (k1, k2) = get_k1_k2::<Bls12_381>(&curve.r, cir_power as usize, domain_size);
-            K1K2::Bls12_381(k1, k2)
-        }
-    };
+    let mut fd_zkey = file::BinFile::create("output.zkey", "zkey", 1, 14).await?;
+    write_additions(&mut fd_zkey, 3, "Additions", n8r, &plonk_additions).await?;
 
-    match k1k2 {
-        K1K2::Bn128(k1, k2) => {
-            println!("ℹ️  k1: {}, k2: {}", k1, k2);
-        }
-        K1K2::Bls12_381(k1, k2) => {
-            println!("ℹ️  k1: {}, k2: {}", k1, k2);
-        }
-    }
     Ok(())
 }
 
-pub fn get_k1_k2<F: Field>(
-    r: &BigUint,
-    pow: usize,
-    domain_size: u64,
-) -> (Element<F>, Element<F>) {
-    let one = Element::<F>::one();
+pub fn get_k1_k2(r: &BigUint, pow: usize, domain_size: u64) -> (Element<Bn128>, Element<Bn128>) {
+    let one = Element::<Bn128>::one();
     let two = &one + &one;
 
     let exp = (r - 1u32) >> pow;
-    let w = two.exponentiation(&Element::<F>::from(exp));
+    let w = two.exponentiation(&Element::<Bn128>::from(exp));
 
-    fn is_included<F: Field>(
-        k: &Element<F>,
-        existing: &[Element<F>],
-        w: &Element<F>,
+    fn is_included(
+        k: &Element<Bn128>,
+        existing: &[Element<Bn128>],
+        w: &Element<Bn128>,
         domain_size: u64,
     ) -> bool {
-        let mut cur = Element::<F>::one();
+        let mut cur = Element::<Bn128>::one();
         for _ in 0..domain_size {
             if k == &cur {
                 return true;
@@ -141,15 +110,65 @@ pub fn get_k1_k2<F: Field>(
 
     // Step 3: find k1
     let mut k1 = two.clone();
-    while is_included::<F>(&k1, &[], &w, domain_size) {
+    while is_included(&k1, &[], &w, domain_size) {
         k1 = &k1 + &one;
     }
 
     // Step 4: find k2
     let mut k2 = &k1 + &one;
-    while is_included::<F>(&k2, &[k1.clone()], &w, domain_size) {
+    while is_included(&k2, &[k1.clone()], &w, domain_size) {
         k2 = &k2 + &one;
     }
 
     (k1, k2)
+}
+
+pub trait ToMontgomeryBytes {
+    fn as_montgomery_bytes(&self) -> Vec<u8>;
+}
+
+impl ToMontgomeryBytes for Element<Bn128> {
+    fn as_montgomery_bytes(&self) -> Vec<u8> {
+        self.to_biguint().to_bytes_le()
+    }
+}
+
+pub async fn write_additions(
+    fd: &mut BinFile,
+    section_num: u32,
+    name: &str,
+    n8r: usize,
+    plonk_additions: &[(u32, u32, Element<Bn128>, Element<Bn128>)],
+) -> Result<(), anyhow::Error> {
+    fd.start_write_section(section_num).await?;
+
+    let mut buffer = vec![0u8; 2 * 4 + 2 * n8r];
+
+    for (i, (a, b, v1, v2)) in plonk_additions.iter().enumerate() {
+        let mut offset = 0;
+
+        buffer[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
+        offset += 4;
+
+        buffer[offset..offset + 4].copy_from_slice(&b.to_le_bytes());
+        offset += 4;
+
+        let v1_bytes = v1.as_montgomery_bytes();
+        let v2_bytes = v2.as_montgomery_bytes();
+
+        buffer[offset..offset + n8r].copy_from_slice(&v1_bytes[..n8r]);
+        offset += n8r;
+
+        buffer[offset..offset + n8r].copy_from_slice(&v2_bytes[..n8r]);
+
+        fd.write_bytes(&buffer).await?;
+
+        if i % 1_000 == 0 {
+            println!("🔧 Writing {name}: {}/{}", i, plonk_additions.len());
+        }
+    }
+
+    fd.end_write_section().await?;
+
+    Ok(())
 }
