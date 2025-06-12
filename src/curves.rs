@@ -21,6 +21,7 @@ pub struct Curve {
 }
 
 impl Curve {
+
     pub fn q() -> BigUint {
         BigUint::parse_bytes(
             b"21888242871839275222246405745257275088696311157297823662689037894645226208583",

@@ -277,7 +277,7 @@ pub fn process_constraints(
             &mut plonk_additions,
         );
         progress += 1;
-        if progress % 1000 == 0 {
+        if progress % 100000 == 0 {
             println!(
                 "ℹ️  Processed {}% of constraints",
                 progress * 100 / r1cs.constraints.len()
