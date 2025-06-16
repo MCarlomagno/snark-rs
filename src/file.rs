@@ -116,13 +116,13 @@ impl BinFile {
     }
 
     pub async fn write_u32(&mut self, val: u32) -> Result<()> {
-        self.file.write_all(&val.to_le_bytes()).await?;
+        self.file.write_u32_le(val).await?;
         self.pos += 4;
         Ok(())
     }
 
     pub async fn write_u64(&mut self, val: u64) -> Result<()> {
-        self.file.write_all(&val.to_le_bytes()).await?;
+        self.file.write_u64_le(val).await?;
         self.pos += 8;
         Ok(())
     }

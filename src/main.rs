@@ -1,13 +1,16 @@
-use std::{cmp::max, ops::Neg};
+use std::{cmp::max, ops::Neg, str::FromStr};
 
-use crate::file::BinFile;
+use crate::{big_buffer::BigBuffer, fft::FftEngine, file::BinFile};
 use ::r1cs::{Bn128, Element, num::BigUint};
+use anyhow::Result;
 
 mod curves;
 mod file;
 mod ptau_file;
 mod r1cs;
 mod utils;
+mod big_buffer;
+mod fft;
 
 use crate::ptau_file::PTauFile;
 
@@ -78,12 +81,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ℹ️  R: {}", curve.r);
     println!("ℹ️  Cir power: {}", cir_power);
 
-    let (k1, k2) = get_k1_k2(&curve.r, cir_power);
+    // let (k1, k2) = get_k1_k2(&curve.r, cir_power);
+    let k1 = Element::<Bn128>::from(2u64);
+    let k2 = Element::<Bn128>::from(3u64);
     println!("ℹ️  k1: {}, k2: {}", k1, k2);
+
 
     let mut fd_zkey = file::BinFile::create("output.zkey", "zkey", 1, 14).await?;
     write_additions(&mut fd_zkey, 3, "Additions", n8r, &plonk_additions).await?;
 
+    write_witness_map(&mut fd_zkey, 4, &plonk_constraints, 0, "Amap").await?;
+    write_witness_map(&mut fd_zkey, 5, &plonk_constraints, 1, "Bmap").await?;
+    write_witness_map(&mut fd_zkey, 6, &plonk_constraints, 2, "Cmap").await?;
+
+    let max_bits = (domain_size as f64).log2().ceil() as usize;
+    let fft_engine = FftEngine::new(max_bits);
+
+    write_q_map(&mut fd_zkey, 7, "Qm", n8r, domain_size, &plonk_constraints, 3, None, &fft_engine).await?;
+    write_q_map(&mut fd_zkey, 8, "Ql", n8r, domain_size, &plonk_constraints, 4, None, &fft_engine).await?;
+    write_q_map(&mut fd_zkey, 9, "Qr", n8r, domain_size, &plonk_constraints, 5, None, &fft_engine).await?;
+    write_q_map(&mut fd_zkey, 10, "Qo", n8r, domain_size, &plonk_constraints, 6, None, &fft_engine).await?;
+    write_q_map(&mut fd_zkey, 11, "Qc", n8r, domain_size, &plonk_constraints, 7, None, &fft_engine).await?;
     Ok(())
 }
 
@@ -170,33 +188,146 @@ pub async fn write_additions(
 ) -> Result<(), anyhow::Error> {
     fd.start_write_section(section_num).await?;
 
-    let mut buffer = vec![0u8; 2 * 4 + 2 * n8r];
-
     for (i, (a, b, v1, v2)) in plonk_additions.iter().enumerate() {
+        let mut buffer = vec![0u8; 2 * 4 + 2 * n8r];
         let mut offset = 0;
-
+    
         buffer[offset..offset + 4].copy_from_slice(&a.to_le_bytes());
         offset += 4;
-
         buffer[offset..offset + 4].copy_from_slice(&b.to_le_bytes());
         offset += 4;
-
-        let v1_bytes = v1.as_montgomery_bytes();
-        let v2_bytes = v2.as_montgomery_bytes();
-
-        buffer[offset..offset + n8r].copy_from_slice(&v1_bytes[..n8r]);
+    
+        let v1_bytes = to_n8r_bytes(&v1.as_montgomery_bytes(), n8r);
+        let v2_bytes = to_n8r_bytes(&v2.as_montgomery_bytes(), n8r);
+    
+        buffer[offset..offset + n8r].copy_from_slice(&v1_bytes);
         offset += n8r;
-
-        buffer[offset..offset + n8r].copy_from_slice(&v2_bytes[..n8r]);
-
+        buffer[offset..offset + n8r].copy_from_slice(&v2_bytes);
+    
         fd.write_bytes(&buffer).await?;
-
-        if i % 1_000 == 0 {
+    
+        if i % 1_000_000 == 0 {
             println!("🔧 Writing {name}: {}/{}", i, plonk_additions.len());
         }
     }
 
     fd.end_write_section().await?;
+    Ok(())
+}
+
+fn to_n8r_bytes(raw: &[u8], n8r: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n8r];
+    let len = raw.len().min(n8r);
+    out[..len].copy_from_slice(&raw[..len]);
+    out
+}
+
+pub async fn write_witness_map(
+    fd: &mut BinFile,
+    section_num: u32,
+    constraints: &[(u32, u32, u32, Element<Bn128>, Element<Bn128>, Element<Bn128>, Element<Bn128>, Element<Bn128>)],
+    pos_constraint: usize,
+    name: &str,
+) -> Result<()> {
+    fd.start_write_section(section_num).await?;
+
+    for (i, constraint) in constraints.iter().enumerate() {
+        let val = match pos_constraint {
+            0 => constraint.0,
+            1 => constraint.1,
+            2 => constraint.2,
+            _ => return Err(anyhow::anyhow!("Invalid pos_constraint index")),
+        };
+        fd.write_u32(val).await?;
+
+        if i % 1_000_000 == 0 {
+            println!("👁️‍🗨️ writing witness map {}: {}/{}", name, i, constraints.len());
+        }
+    }
+
+    fd.end_write_section().await?;
+    Ok(())
+}
+
+pub async fn write_q_map(
+    fd: &mut BinFile,
+    section_num: u32,
+    name: &str,
+    n8r: usize,
+    domain_size: usize,
+    plonk_constraints: &[(u32, u32, u32, Element<Bn128>, Element<Bn128>, Element<Bn128>, Element<Bn128>, Element<Bn128>)],
+    pos_constraint: usize,
+    logger: Option<&dyn Fn(&str)>,
+    fft: &FftEngine,
+) -> Result<BigBuffer> {
+    let mut q_buffer = BigBuffer::new(domain_size * n8r);
+
+    for (i, constraint) in plonk_constraints.iter().enumerate() {
+        let elem = match pos_constraint {
+            3 => &constraint.3,
+            4 => &constraint.4,
+            5 => &constraint.5,
+            6 => &constraint.6,
+            7 => &constraint.7,
+            _ => panic!("Invalid pos_constraint index"),
+        };
+
+        let bytes = elem.to_biguint().to_bytes_le();
+        let mut padded = vec![0u8; n8r];
+        padded[..bytes.len()].copy_from_slice(&bytes);
+        q_buffer.set(&padded, i * n8r);
+
+        if i % 1_000_000 == 0 {
+            if let Some(log) = logger {
+                log(&format!("🌀 writing {}: {}/{}", name, i, plonk_constraints.len()));
+            }
+        }
+    }
+
+    fd.start_write_section(section_num).await?;
+    write_p4(fd, &q_buffer, domain_size, n8r, fft).await?;
+    fd.end_write_section().await?;
+
+    Ok(q_buffer)
+}
+
+pub async fn write_p4(
+    fd: &mut BinFile,
+    input: &BigBuffer,
+    domain_size: usize,
+    n8r: usize,
+    fft: &FftEngine,
+) -> Result<()> {
+    // Deserialize into Vec<Element<Bn128>>
+    let q: Vec<Element<Bn128>> = (0..domain_size)
+        .map(|i| {
+            let bytes = input.slice(i * n8r, (i + 1) * n8r);
+            let num = BigUint::from_bytes_le(&bytes);
+            Element::<Bn128>::from_str(&num.to_string()).unwrap()
+        })
+        .collect();
+
+    let q_ifft = fft.ifft(&q);
+    let mut q4_input = vec![Element::<Bn128>::zero(); domain_size * 4];
+    q4_input[..domain_size].clone_from_slice(&q_ifft);
+
+    let q4_fft = fft.fft(&q4_input);
+
+    // Write q_ifft
+    for elem in &q_ifft {
+        let bytes = elem.to_biguint().to_bytes_le();
+        let mut padded = vec![0u8; n8r];
+        padded[..bytes.len()].copy_from_slice(&bytes);
+        fd.write_bytes(&padded).await?;
+    }
+
+    // Write q4_fft
+    for elem in &q4_fft {
+        let bytes = elem.to_biguint().to_bytes_le();
+        let mut padded = vec![0u8; n8r];
+        padded[..bytes.len()].copy_from_slice(&bytes);
+        fd.write_bytes(&padded).await?;
+    }
 
     Ok(())
 }
